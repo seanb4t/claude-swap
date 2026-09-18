@@ -995,6 +995,15 @@ class CredentialStore:
         # that just failed. Write the plaintext file and (macOS) best-effort clear
         # any stale Keychain entry so Claude Code's keychain-first read can't shadow
         # it (#30337).
+        # CLAUDE_SWAP_KEYCHAIN_ONLY: on macOS, fail the write instead of moving
+        # the credential into a plaintext file and deleting the Keychain item.
+        if self._host.platform == Platform.MACOS and os.environ.get(
+            "CLAUDE_SWAP_KEYCHAIN_ONLY"
+        ):
+            raise CredentialWriteError(
+                "Keychain write unavailable; refusing the plaintext "
+                "credentials-file fallback (CLAUDE_SWAP_KEYCHAIN_ONLY is set)"
+            )
         try:
             self._write_active_credentials_file(credentials)
         except Exception as e:

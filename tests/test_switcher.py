@@ -19,6 +19,7 @@ from claude_swap.exceptions import (
     AccountNotFoundError,
     ConfigError,
     CredentialReadError,
+    CredentialWriteError,
     SessionError,
     SwitchError,
     ValidationError,
@@ -6176,6 +6177,26 @@ class TestMacosKeychainFallback:
         assert store._last_active_credentials_backend == "file"
         assert s._keychain_disabled_until == 0.0   # no re-probe scheduled
         assert s._use_keychain() is False          # pinned, stays file mode
+
+    def test_keychain_only_env_refuses_the_plaintext_fallback(
+        self, temp_home: Path, monkeypatch
+    ):
+        # CLAUDE_SWAP_KEYCHAIN_ONLY: a failed Keychain write raises instead of
+        # writing the plaintext file and deleting the live Keychain item.
+        s = self._macos_switcher()
+        store = s._store
+        monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "1")
+        monkeypatch.setattr(macos_keychain, "set_password", _raise_locked)
+        deleted: list = []
+        written: list = []
+        monkeypatch.setattr(
+            macos_keychain, "delete_password", lambda *a, **k: deleted.append(a)
+        )
+        monkeypatch.setattr(store, "_write_active_credentials_file", written.append)
+        with pytest.raises(CredentialWriteError):
+            store._write_oauth_credentials('{"claudeAiOauth": {"accessToken": "x"}}')
+        assert written == []
+        assert deleted == []
 
     def test_write_fallback_clears_pending_read_reprobe(self, temp_home: Path, monkeypatch):
         # The owner's edge: already in file mode from a read timeout with a
