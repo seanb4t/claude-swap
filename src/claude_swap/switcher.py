@@ -2224,6 +2224,18 @@ class ClaudeAccountSwitcher:
                             refresh_input = profile
                             input_oauth = prof_oauth
                 consumed_fp = oauth.credential_fingerprint(refresh_input)
+                # hardening.noActiveRefresh: a slot read as inactive (e.g.
+                # through a torn ~/.claude.json) whose grant is the live
+                # store's belongs to the active account; Claude Code alone
+                # spends it.
+                if consumed_fp and hardening_enabled("no_active_refresh"):
+                    live = self._read_credentials()
+                    if live and oauth.credential_fingerprint(live) == consumed_fp:
+                        self._logger.info(
+                            "Account %s's refresh token is the live one; "
+                            "leaving its refresh to Claude Code.", account_num,
+                        )
+                        return oauth.RefreshOutcome(None, "transient")
         except LockError:
             # Nothing consumed yet — a holder (switch, collector, CC) owns
             # the slot; defer cleanly rather than raise through callers

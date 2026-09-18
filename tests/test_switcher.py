@@ -9760,6 +9760,23 @@ class TestConsumeGate:
         assert result.credentials == self._NEW
         assert s._read_account_credentials("1", "test@example.com") == self._NEW
 
+    def test_no_active_refresh_never_spends_the_live_grant(
+        self, temp_home: Path, sample_sequence_data: dict, monkeypatch
+    ):
+        """A slot the collector read as inactive whose refresh token is the
+        live store's is the active account; the gate leaves it to Claude Code."""
+        s = self._switcher(sample_sequence_data)
+        s._write_account_credentials("1", "test@example.com", self._OLD)
+        monkeypatch.setenv("CLAUDE_SWAP_NO_ACTIVE_REFRESH", "1")
+
+        with patch.object(s, "_read_credentials", return_value=self._OLD), \
+             patch("claude_swap.oauth.try_refresh_oauth_credentials") as mock_refresh:
+            result = s.consume_backup_grant("1", "test@example.com", self._OLD)
+
+        mock_refresh.assert_not_called()
+        assert result.error == "transient"
+        assert s._read_account_credentials("1", "test@example.com") == self._OLD
+
     def test_gate_cas_persist_detects_racing_writer(
         self, temp_home: Path, sample_sequence_data: dict
     ):
