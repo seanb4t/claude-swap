@@ -45,6 +45,8 @@ def _detect_install_method() -> str | None:
 
 def check_for_update(current_version: str) -> str | None:
     """Return a notification string if a newer version exists, else None."""
+    if os.environ.get("CLAUDE_SWAP_NO_UPDATE_CHECK"):
+        return None
     try:
         latest_version = None
 
