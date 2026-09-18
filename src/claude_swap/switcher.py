@@ -10,6 +10,7 @@ import re
 import shutil
 import threading
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -560,9 +561,12 @@ class ClaudeAccountSwitcher:
         """Write JSON file with validation."""
         content = json.dumps(data, indent=2)
 
-        # Write to temp file first
-        temp_path = path.with_suffix(f".{os.getpid()}.tmp")
-        temp_path.write_text(content, encoding="utf-8")
+        # Write to a temp file first; mkstemp creates it 0600, so the content
+        # is never readable under the process umask.
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f"{path.name}.", suffix=".tmp")
+        temp_path = Path(tmp)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
 
         # Validate written content
         try:

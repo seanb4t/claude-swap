@@ -12486,3 +12486,29 @@ class TestSessionShellGuardCoversEveryMutator:
         s = self._switcher(sample_sequence_data, monkeypatch)
         with pytest.raises(SwitchError):
             s.unset_alias("2")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+class TestWriteJsonTempFile:
+    def test_temp_file_is_private_from_creation(self, temp_home: Path):
+        """_write_json's temp file is 0600 from creation, whatever the umask."""
+        switcher = ClaudeAccountSwitcher()
+        target = temp_home / "state.json"
+        modes: list = []
+        real_loads = json.loads
+
+        def spy(text, *args, **kwargs):
+            modes.extend(p.stat().st_mode & 0o777 for p in temp_home.glob("state.json.*.tmp"))
+            return real_loads(text, *args, **kwargs)
+
+        old_umask = os.umask(0)
+        try:
+            with patch("claude_swap.switcher.json.loads", side_effect=spy):
+                switcher._write_json(target, {"k": 1})
+        finally:
+            os.umask(old_umask)
+
+        assert modes == [0o600]
+        assert json.loads(target.read_text()) == {"k": 1}
+        assert target.stat().st_mode & 0o777 == 0o600
+        assert not list(temp_home.glob("state.json.*.tmp"))
