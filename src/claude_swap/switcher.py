@@ -86,7 +86,12 @@ from claude_swap.paths import (
 )
 from claude_swap.process_detection import get_running_instances
 from claude_swap import poll_policy
-from claude_swap.settings import load_settings, parse_model_names, settings_path
+from claude_swap.settings import (
+    hardening_enabled,
+    load_settings,
+    parse_model_names,
+    settings_path,
+)
 from claude_swap.usage_store import (
     FetchRecord,
     UsageEntry,
@@ -4212,10 +4217,10 @@ class ClaudeAccountSwitcher:
                 or FetchRecord(sentinel=USAGE_KEYCHAIN_UNAVAILABLE)
             )
 
-        # CLAUDE_SWAP_NO_ACTIVE_REFRESH: a usage fetch never rotates or
-        # replaces the active credential; Claude Code refreshes it on its
-        # next use, and until then an expired token reads as expired.
-        if os.environ.get("CLAUDE_SWAP_NO_ACTIVE_REFRESH"):
+        # hardening.noActiveRefresh: a usage fetch never rotates or replaces
+        # the active credential; Claude Code refreshes it on its next use,
+        # and until then an expired token reads as expired.
+        if hardening_enabled("no_active_refresh"):
             return _defer(force_refresh)
 
         # Store-resolution parity (M4), same refusal as the consume gate:

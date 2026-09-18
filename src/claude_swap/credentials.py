@@ -41,6 +41,7 @@ from claude_swap.paths import (
     get_default_claude_config_home,
     get_global_config_path,
 )
+from claude_swap.settings import hardening_enabled
 
 _logger = logging.getLogger("claude-swap")
 
@@ -995,14 +996,14 @@ class CredentialStore:
         # that just failed. Write the plaintext file and (macOS) best-effort clear
         # any stale Keychain entry so Claude Code's keychain-first read can't shadow
         # it (#30337).
-        # CLAUDE_SWAP_KEYCHAIN_ONLY: on macOS, fail the write instead of moving
+        # hardening.keychainOnly: on macOS, fail the write instead of moving
         # the credential into a plaintext file and deleting the Keychain item.
-        if self._host.platform == Platform.MACOS and os.environ.get(
-            "CLAUDE_SWAP_KEYCHAIN_ONLY"
+        if self._host.platform == Platform.MACOS and hardening_enabled(
+            "keychain_only"
         ):
             raise CredentialWriteError(
-                "Keychain write unavailable; refusing the plaintext "
-                "credentials-file fallback (CLAUDE_SWAP_KEYCHAIN_ONLY is set)"
+                "Keychain write unavailable; hardening.keychainOnly forbids "
+                "the plaintext credentials-file fallback"
             )
         try:
             self._write_active_credentials_file(credentials)

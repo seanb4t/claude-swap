@@ -15,8 +15,11 @@ from claude_swap.settings import (
     SETTING_SPECS,
     atomic_write_json,
     AutoSwitchSettings,
+    HardeningSettings,
     UiSettings,
+    HARDENING_ENV,
     effective_settings,
+    hardening_enabled,
     load_settings,
     load_ui_settings,
     merged_with_cli,
@@ -163,9 +166,16 @@ class TestSettingSpecs:
         assert by_section["ui"] == {
             f.name for f in UiSettings.__dataclass_fields__.values()
         }
+        assert by_section["hardening"] == {
+            f.name for f in HardeningSettings.__dataclass_fields__.values()
+        }
 
     def test_defaults_match_dataclass(self):
-        sources = {"autoswitch": AutoSwitchSettings(), "ui": UiSettings()}
+        sources = {
+            "autoswitch": AutoSwitchSettings(),
+            "ui": UiSettings(),
+            "hardening": HardeningSettings(),
+        }
         for spec in SETTING_SPECS.values():
             assert spec.default == getattr(sources[spec.section], spec.field)
 
@@ -355,3 +365,36 @@ class TestAtomicWriteThroughSymlink:
         assert (repo.stat().st_mode & 0o777) == 0o755, "foreign dir untouched"
         assert (live.stat().st_mode & 0o777) == 0o700, "our dir hardened"
         assert (tracked.stat().st_mode & 0o777) == 0o600, "file still 0600"
+
+
+class TestHardening:
+    @pytest.fixture
+    def root(self, tmp_path: Path, monkeypatch) -> Path:
+        monkeypatch.setattr("claude_swap.paths.get_backup_root", lambda: tmp_path)
+        return tmp_path
+
+    def test_off_by_default(self, root: Path):
+        for field in HARDENING_ENV:
+            assert hardening_enabled(field) is False
+
+    def test_settings_file_turns_an_option_on(self, root: Path):
+        set_setting(root, "hardening.keychainOnly", "true")
+        assert hardening_enabled("keychain_only") is True
+        assert hardening_enabled("no_active_refresh") is False
+
+    def test_env_boolean_word_wins_over_the_file(self, root: Path, monkeypatch):
+        set_setting(root, "hardening.noActiveRefresh", "true")
+        monkeypatch.setenv("CLAUDE_SWAP_NO_ACTIVE_REFRESH", "0")
+        assert hardening_enabled("no_active_refresh") is False
+        monkeypatch.setenv("CLAUDE_SWAP_NO_UPDATE_CHECK", "yes")
+        assert hardening_enabled("no_update_check") is True
+
+    def test_env_non_boolean_defers_to_the_file(self, root: Path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "maybe")
+        assert hardening_enabled("keychain_only") is False
+        set_setting(root, "hardening.keychainOnly", "true")
+        assert hardening_enabled("keychain_only") is True
+
+    def test_non_bool_value_in_the_file_is_ignored(self, root: Path):
+        settings_path(root).write_text(json.dumps({"hardening": {"keychainOnly": "true"}}))
+        assert hardening_enabled("keychain_only") is False

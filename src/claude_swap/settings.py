@@ -67,7 +67,29 @@ class UiSettings:
     theme: str = "auto"
 
 
-_SECTION_DEFAULT_SOURCES = {"autoswitch": AutoSwitchSettings, "ui": UiSettings}
+@dataclass(frozen=True)
+class HardeningSettings:
+    """Opt-in safety options (``hardening`` section). Each is also set by its
+    environment variable (``HARDENING_ENV``), which wins when it holds a
+    boolean word; see :func:`hardening_enabled`."""
+
+    keychain_only: bool = False
+    no_active_refresh: bool = False
+    no_update_check: bool = False
+
+
+HARDENING_ENV: dict[str, str] = {
+    "keychain_only": "CLAUDE_SWAP_KEYCHAIN_ONLY",
+    "no_active_refresh": "CLAUDE_SWAP_NO_ACTIVE_REFRESH",
+    "no_update_check": "CLAUDE_SWAP_NO_UPDATE_CHECK",
+}
+
+
+_SECTION_DEFAULT_SOURCES = {
+    "autoswitch": AutoSwitchSettings,
+    "ui": UiSettings,
+    "hardening": HardeningSettings,
+}
 
 
 @dataclass(frozen=True)
@@ -138,6 +160,18 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec(
             "ui", "theme", "theme", "choice", choices=("dark", "light", "auto"),
             help="Color theme; auto follows the terminal background",
+        ),
+        SettingSpec(
+            "hardening", "keychainOnly", "keychain_only", "bool",
+            help="macOS: fail a credential write rather than store it outside the Keychain",
+        ),
+        SettingSpec(
+            "hardening", "noActiveRefresh", "no_active_refresh", "bool",
+            help="Never refresh or rewrite the active account's token; Claude Code does",
+        ),
+        SettingSpec(
+            "hardening", "noUpdateCheck", "no_update_check", "bool",
+            help="Skip the PyPI update check",
         ),
     )
 }
@@ -246,6 +280,34 @@ def load_ui_settings(backup_root: Path) -> UiSettings:
         )
         return default
     return UiSettings(theme=theme)
+
+
+def load_hardening_settings(backup_root: Path) -> HardeningSettings:
+    """Load the hardening section; a missing file, section, or non-bool value
+    means that option's default (off)."""
+    section = _read_raw(settings_path(backup_root)).get("hardening")
+    if not isinstance(section, dict):
+        return HardeningSettings()
+    kwargs = {}
+    for spec in SETTING_SPECS.values():
+        if spec.section == "hardening" and isinstance(section.get(spec.json_key), bool):
+            kwargs[spec.field] = section[spec.json_key]
+    return HardeningSettings(**kwargs)
+
+
+def hardening_enabled(field: str) -> bool:
+    """Whether a hardening option is on.
+
+    The environment variable wins when it holds a boolean word (true/false,
+    1/0, yes/no); otherwise ``settings.json`` decides, so the option holds for
+    every invocation: any shell, a LaunchAgent, a script.
+    """
+    raw = os.environ.get(HARDENING_ENV[field], "").strip().lower()
+    if raw in _BOOL_WORDS:
+        return _BOOL_WORDS[raw]
+    from claude_swap.paths import get_backup_root
+
+    return getattr(load_hardening_settings(get_backup_root()), field)
 
 
 def save_settings(backup_root: Path, settings: AutoSwitchSettings) -> None:
@@ -412,6 +474,7 @@ def effective_settings(backup_root: Path) -> list[tuple[SettingSpec, object, boo
     loaded = {
         "autoswitch": load_settings(backup_root),
         "ui": load_ui_settings(backup_root),
+        "hardening": load_hardening_settings(backup_root),
     }
     rows = []
     for spec in SETTING_SPECS.values():

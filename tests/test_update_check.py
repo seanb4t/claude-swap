@@ -115,6 +115,17 @@ class TestCheckForUpdate:
         mock_urlopen.assert_not_called()
         assert result is None
 
+    @patch("claude_swap.update_check.urllib.request.urlopen")
+    def test_settings_opt_out_skips_the_check(self, mock_urlopen, tmp_path, monkeypatch):
+        from claude_swap.settings import set_setting
+
+        monkeypatch.setattr("claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json")
+        monkeypatch.setattr("claude_swap.paths.get_backup_root", lambda: tmp_path)
+        set_setting(tmp_path, "hardening.noUpdateCheck", "true")
+
+        assert check_for_update("0.3.2") is None
+        mock_urlopen.assert_not_called()
+
 
 class TestDetectInstallMethod:
     def _set_prefix(self, monkeypatch, prefix: str) -> None:
