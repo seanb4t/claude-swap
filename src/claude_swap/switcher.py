@@ -4212,6 +4212,12 @@ class ClaudeAccountSwitcher:
                 or FetchRecord(sentinel=USAGE_KEYCHAIN_UNAVAILABLE)
             )
 
+        # CLAUDE_SWAP_NO_ACTIVE_REFRESH: a usage fetch never rotates or
+        # replaces the active credential; Claude Code refreshes it on its
+        # next use, and until then an expired token reads as expired.
+        if os.environ.get("CLAUDE_SWAP_NO_ACTIVE_REFRESH"):
+            return _defer(force_refresh)
+
         # Store-resolution parity (M4), same refusal as the consume gate:
         # with CLAUDE_SECURESTORAGE_CONFIG_DIR set, CC reads/writes a
         # redirected store while this path resolves the default one (capture

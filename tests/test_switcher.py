@@ -3135,6 +3135,31 @@ class TestActiveAccountRefresh:
         assert written["claudeAiOauth"]["refreshToken"] == "rt-successor"
         assert written["mcpOAuth"] == {"srv": "current"}
 
+    def test_no_active_refresh_env_leaves_the_token_to_claude_code(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict,
+        monkeypatch,
+    ):
+        """With CLAUDE_SWAP_NO_ACTIVE_REFRESH set, an expired active token is
+        reported as expired: no refresh POST, no restore, no store writes."""
+        monkeypatch.setenv("CLAUDE_SWAP_NO_ACTIVE_REFRESH", "1")
+        switcher = self._switcher(sample_sequence_data)
+
+        with patch.object(switcher, "_read_credentials", return_value=self._EXPIRED), \
+             patch.object(
+                 switcher, "_read_account_credentials", return_value=self._EXPIRED
+             ), \
+             patch.object(switcher, "_write_credentials") as write_live, \
+             patch.object(switcher, "_write_account_credentials") as write_backup, \
+             patch("claude_swap.oauth.try_refresh_oauth_credentials") as mock_refresh:
+            result = switcher._fetch_active_usage(
+                "1", "test@example.com", self._EXPIRED
+            )
+
+        assert result.sentinel == USAGE_TOKEN_EXPIRED
+        mock_refresh.assert_not_called()
+        write_live.assert_not_called()
+        write_backup.assert_not_called()
+
     def test_no_token_returns_no_credentials(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
     ):
