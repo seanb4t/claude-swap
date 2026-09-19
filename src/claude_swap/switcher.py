@@ -2304,6 +2304,16 @@ class ClaudeAccountSwitcher:
             # never fires and the POST proceeds.
             return oauth.RefreshOutcome(refresh_input, None, None, consumed_fp)
 
+        # hardening.keychainOnly: with no plaintext stash, a successor that
+        # cannot reach the Keychain is lost, so spend no grant while the
+        # Keychain is known unusable.
+        if self._store._keychain_only() and not self._use_keychain():
+            self._logger.info(
+                "Keychain unusable; deferring account %s's refresh so its "
+                "successor can be persisted.", account_num,
+            )
+            return oauth.RefreshOutcome(None, "transient")
+
         result = oauth.try_refresh_oauth_credentials(refresh_input)
         if result.error is not None or not result.credentials:
             # Strike binding must follow the POSTed bytes: the gate may have

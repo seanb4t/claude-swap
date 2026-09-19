@@ -9799,6 +9799,23 @@ class TestConsumeGate:
         mock_refresh.assert_not_called()
         assert result.error == "transient"
 
+    def test_keychain_only_spends_no_grant_while_the_keychain_is_unusable(
+        self, temp_home: Path, sample_sequence_data: dict, monkeypatch
+    ):
+        """keychainOnly has no plaintext stash, so a successor that cannot
+        reach the Keychain would be lost: the gate spends nothing."""
+        s = self._switcher(sample_sequence_data)
+        s.platform = Platform.MACOS
+        s._write_account_credentials("1", "test@example.com", self._OLD)
+        monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "1")
+        s._keychain_usable_cache = False
+
+        with patch("claude_swap.oauth.try_refresh_oauth_credentials") as mock_refresh:
+            result = s.consume_backup_grant("1", "test@example.com", self._OLD)
+
+        mock_refresh.assert_not_called()
+        assert result.error == "transient"
+
     def test_gate_cas_persist_detects_racing_writer(
         self, temp_home: Path, sample_sequence_data: dict
     ):
