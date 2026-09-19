@@ -2227,13 +2227,24 @@ class ClaudeAccountSwitcher:
                 # hardening.noActiveRefresh: a slot read as inactive (e.g.
                 # through a torn ~/.claude.json) whose grant is the live
                 # store's belongs to the active account; Claude Code alone
-                # spends it.
+                # spends it. A live store that cannot be read cannot rule
+                # that out, so it defers too.
                 if consumed_fp and hardening_enabled("no_active_refresh"):
-                    live = self._read_credentials()
-                    if live and oauth.credential_fingerprint(live) == consumed_fp:
+                    active = self._read_active_credentials()
+                    if (
+                        active.value is None
+                        or active.keychain_unavailable
+                        or active.degraded
+                        or (
+                            active.value
+                            and oauth.credential_fingerprint(active.value)
+                            == consumed_fp
+                        )
+                    ):
                         self._logger.info(
-                            "Account %s's refresh token is the live one; "
-                            "leaving its refresh to Claude Code.", account_num,
+                            "Account %s's refresh token is, or may be, the "
+                            "live one; leaving its refresh to Claude Code.",
+                            account_num,
                         )
                         return oauth.RefreshOutcome(None, "transient")
         except LockError:
