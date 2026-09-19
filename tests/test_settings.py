@@ -395,6 +395,18 @@ class TestHardening:
         set_setting(root, "hardening.keychainOnly", "true")
         assert hardening_enabled("keychain_only") is True
 
-    def test_non_bool_value_in_the_file_is_ignored(self, root: Path):
-        settings_path(root).write_text(json.dumps({"hardening": {"keychainOnly": "true"}}))
+    def test_missing_section_or_key_is_off(self, root: Path):
+        settings_path(root).write_text(json.dumps({"ui": {"theme": "dark"}}))
         assert hardening_enabled("keychain_only") is False
+        settings_path(root).write_text(json.dumps({"hardening": {}}))
+        assert hardening_enabled("keychain_only") is False
+
+    @pytest.mark.parametrize("content", [
+        "{not json",
+        json.dumps(["not", "an", "object"]),
+        json.dumps({"hardening": "on"}),
+        json.dumps({"hardening": {"keychainOnly": "true"}}),
+    ])
+    def test_unreadable_or_non_boolean_counts_as_on(self, root: Path, content: str):
+        settings_path(root).write_text(content)
+        assert hardening_enabled("keychain_only") is True

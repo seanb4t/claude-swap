@@ -176,6 +176,12 @@ SETTING_SPECS: dict[str, SettingSpec] = {
     )
 }
 
+_HARDENING_JSON_KEYS: dict[str, str] = {
+    spec.field: spec.json_key
+    for spec in SETTING_SPECS.values()
+    if spec.section == "hardening"
+}
+
 _AUTOSWITCH_KEYS: dict[str, str] = {
     spec.field: spec.json_key
     for spec in SETTING_SPECS.values()
@@ -300,14 +306,34 @@ def hardening_enabled(field: str) -> bool:
 
     The environment variable wins when it holds a boolean word (true/false,
     1/0, yes/no); otherwise ``settings.json`` decides, so the option holds for
-    every invocation: any shell, a LaunchAgent, a script.
+    every invocation: any shell, a LaunchAgent, a script. Every option is the
+    stricter behavior, so a file or ``hardening`` section that cannot be read,
+    or a value that is not a JSON boolean, counts as on.
     """
     raw = os.environ.get(HARDENING_ENV[field], "").strip().lower()
     if raw in _BOOL_WORDS:
         return _BOOL_WORDS[raw]
     from claude_swap.paths import get_backup_root
 
-    return getattr(load_hardening_settings(get_backup_root()), field)
+    path = settings_path(get_backup_root())
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        _logger.warning("Could not read %s (%s); hardening options count as on", path, e)
+        return True
+    if not isinstance(data, dict):
+        return True
+    section = data.get("hardening")
+    if section is None:
+        return False
+    if not isinstance(section, dict):
+        return True
+    value = section.get(_HARDENING_JSON_KEYS[field])
+    if value is None:
+        return False
+    return value if isinstance(value, bool) else True
 
 
 def save_settings(backup_root: Path, settings: AutoSwitchSettings) -> None:
