@@ -1214,6 +1214,12 @@ class CredentialStore:
             enc_file.unlink()
             return
         except Exception as e:
+            if self._keychain_only():
+                raise CredentialWriteError(
+                    f"Could not delete {enc_file.name}, which shadows the "
+                    f"Keychain backup ({e}); hardening.keychainOnly forbids "
+                    "rewriting it"
+                ) from e
             self._host._logger.warning(
                 f"Could not delete .enc after Keychain backup write ({e}); "
                 "rewriting it with the fresh credentials to keep both consistent"
@@ -1382,6 +1388,14 @@ class CredentialStore:
         a /login.
         """
         self._retain_previous_backup(account_num, email, credentials)
+        if self._keychain_only():
+            self._keychain_only_set(
+                SECURITY_SERVICE,
+                self._backup_username(account_num, email),
+                credentials,
+            )
+            self._reconcile_enc_after_keychain_write(account_num, email, credentials)
+            return
         if self._use_keychain():
             try:
                 self._kc_write_backup(account_num, email, credentials)
@@ -1397,11 +1411,6 @@ class CredentialStore:
 
         # File mode: write the .enc atomically, then (macOS) best-effort drop the
         # stale Keychain copy so a recovered Keychain can't shadow the fresh file.
-        if self._keychain_only():
-            raise CredentialWriteError(
-                f"Keychain unavailable for account {account_num}'s backup; "
-                "hardening.keychainOnly forbids the .enc fallback"
-            )
         try:
             self._write_backup_enc(account_num, email, credentials)
         except Exception as e:

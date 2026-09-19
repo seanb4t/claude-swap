@@ -6314,13 +6314,51 @@ class TestMacosKeychainFallback:
             store._write_managed_credentials("sk-ant-api03-" + "x" * 40)
         assert config_writes == []
 
+    def test_keychain_only_backup_writes_despite_a_cached_unusable_verdict(
+        self, temp_home: Path, monkeypatch, block_real_keychain
+    ):
+        s = self._macos_switcher()
+        store = s._store
+        s._keychain_usable_cache = False
+        creds = '{"claudeAiOauth": {"accessToken": "k"}}'
+        monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "1")
+        store._write_account_credentials("1", "a@example.com", creds)
+        username = store._backup_username("1", "a@example.com")
+        assert block_real_keychain.data[(SECURITY_SERVICE, username)] == creds
+        assert not store._backup_enc_path("1", "a@example.com").exists()
+
+    def test_keychain_only_reconcile_refuses_rewriting_a_stuck_enc(
+        self, temp_home: Path, monkeypatch
+    ):
+        # A leftover .enc that cannot be deleted would shadow the Keychain
+        # backup; keychainOnly raises instead of rewriting it with the token.
+        s = self._macos_switcher()
+        store = s._store
+        enc = store._backup_enc_path("1", "a@example.com")
+        store._write_backup_enc("1", "a@example.com", '{"claudeAiOauth": {"accessToken": "old"}}')
+        stale = enc.read_text()
+        real_unlink = Path.unlink
+
+        def stuck_unlink(self, *args, **kwargs):
+            if self == enc:
+                raise PermissionError("busy")
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", stuck_unlink)
+        monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "1")
+        with pytest.raises(CredentialWriteError, match="shadows"):
+            store._write_account_credentials(
+                "1", "a@example.com", '{"claudeAiOauth": {"accessToken": "new"}}'
+            )
+        assert enc.read_text() == stale
+
     def test_keychain_only_backup_refuses_the_enc_fallback(
         self, temp_home: Path, monkeypatch
     ):
         s = self._macos_switcher()
         store = s._store
-        s._keychain_usable_cache = False
         monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "1")
+        monkeypatch.setattr(macos_keychain, "set_password", _raise_locked)
         with pytest.raises(CredentialWriteError):
             store._write_account_credentials(
                 "1", "a@example.com", '{"claudeAiOauth": {"accessToken": "z"}}'
