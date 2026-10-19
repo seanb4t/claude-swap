@@ -86,10 +86,27 @@ class UpdateSettings:
     check: bool = True
 
 
+@dataclass(frozen=True)
+class HardeningSettings:
+    """Opt-in safety options (``hardening`` section). Each is also set by its
+    environment variable (``HARDENING_ENV``), which wins when it holds a
+    boolean word; see :func:`hardening_enabled`."""
+
+    keychain_only: bool = False
+    no_active_refresh: bool = False
+
+
+HARDENING_ENV: dict[str, str] = {
+    "keychain_only": "CLAUDE_SWAP_KEYCHAIN_ONLY",
+    "no_active_refresh": "CLAUDE_SWAP_NO_ACTIVE_REFRESH",
+}
+
+
 _SECTION_DEFAULT_SOURCES = {
     "autoswitch": AutoSwitchSettings,
     "ui": UiSettings,
     "updates": UpdateSettings,
+    "hardening": HardeningSettings,
 }
 
 
@@ -170,7 +187,21 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             "updates", "check", "check", "bool",
             help="Check PyPI once a day and print a hint when a newer release exists",
         ),
+        SettingSpec(
+            "hardening", "keychainOnly", "keychain_only", "bool",
+            help="macOS: fail a credential write rather than store it outside the Keychain",
+        ),
+        SettingSpec(
+            "hardening", "noActiveRefresh", "no_active_refresh", "bool",
+            help="Never refresh or rewrite the active account's token; Claude Code does",
+        ),
     )
+}
+
+_HARDENING_JSON_KEYS: dict[str, str] = {
+    spec.field: spec.json_key
+    for spec in SETTING_SPECS.values()
+    if spec.section == "hardening"
 }
 
 _AUTOSWITCH_KEYS: dict[str, str] = {
@@ -303,6 +334,54 @@ def load_update_settings(backup_root: Path) -> UpdateSettings:
         )
         return default
     return UpdateSettings(check=check)
+
+
+def load_hardening_settings(backup_root: Path) -> HardeningSettings:
+    """Load the hardening section; a missing file, section, or non-bool value
+    means that option's default (off)."""
+    section = _read_raw(settings_path(backup_root)).get("hardening")
+    if not isinstance(section, dict):
+        return HardeningSettings()
+    kwargs = {}
+    for spec in SETTING_SPECS.values():
+        if spec.section == "hardening" and isinstance(section.get(spec.json_key), bool):
+            kwargs[spec.field] = section[spec.json_key]
+    return HardeningSettings(**kwargs)
+
+
+def hardening_enabled(field: str) -> bool:
+    """Whether a hardening option is on.
+
+    The environment variable wins when it holds a boolean word (true/false,
+    1/0, yes/no); otherwise ``settings.json`` decides, so the option holds for
+    every invocation: any shell, a LaunchAgent, a script. Every option is the
+    stricter behavior, so a file or ``hardening`` section that cannot be read,
+    or a value that is not a JSON boolean, counts as on.
+    """
+    raw = os.environ.get(HARDENING_ENV[field], "").strip().lower()
+    if raw in _BOOL_WORDS:
+        return _BOOL_WORDS[raw]
+    from claude_swap.paths import get_backup_root
+
+    path = settings_path(get_backup_root())
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        _logger.warning("Could not read %s (%s); hardening options count as on", path, e)
+        return True
+    if not isinstance(data, dict):
+        return True
+    section = data.get("hardening")
+    if section is None:
+        return False
+    if not isinstance(section, dict):
+        return True
+    value = section.get(_HARDENING_JSON_KEYS[field])
+    if value is None:
+        return False
+    return value if isinstance(value, bool) else True
 
 
 def save_settings(backup_root: Path, settings: AutoSwitchSettings) -> None:
@@ -477,6 +556,7 @@ def effective_settings(backup_root: Path) -> list[tuple[SettingSpec, object, boo
         "autoswitch": load_settings(backup_root),
         "ui": load_ui_settings(backup_root),
         "updates": load_update_settings(backup_root),
+        "hardening": load_hardening_settings(backup_root),
     }
     rows = []
     for spec in SETTING_SPECS.values():

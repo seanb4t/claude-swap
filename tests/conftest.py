@@ -724,6 +724,15 @@ def _deterministic_poll_jitter(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _clear_hardening_env(monkeypatch):
+    """The hardening options start off in every test, whatever the shell exports."""
+    from claude_swap.settings import HARDENING_ENV
+
+    for name in HARDENING_ENV.values():
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _deterministic_colour(monkeypatch):
     """A developer's terminal must not decide whether the suite passes.
 
