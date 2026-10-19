@@ -3275,6 +3275,31 @@ class TestActiveAccountRefresh:
         assert written["claudeAiOauth"]["refreshToken"] == "rt-successor"
         assert written["mcpOAuth"] == {"srv": "current"}
 
+    def test_no_active_refresh_env_leaves_the_token_to_claude_code(
+        self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict,
+        monkeypatch,
+    ):
+        """With CLAUDE_SWAP_NO_ACTIVE_REFRESH set, an expired active token is
+        reported as expired: no refresh POST, no restore, no store writes."""
+        monkeypatch.setenv("CLAUDE_SWAP_NO_ACTIVE_REFRESH", "1")
+        switcher = self._switcher(sample_sequence_data)
+
+        with patch.object(switcher, "_read_credentials", return_value=self._EXPIRED), \
+             patch.object(
+                 switcher, "_read_account_credentials", return_value=self._EXPIRED
+             ), \
+             patch.object(switcher, "_write_credentials") as write_live, \
+             patch.object(switcher, "_write_account_credentials") as write_backup, \
+             patch("claude_swap.oauth.try_refresh_oauth_credentials") as mock_refresh:
+            result = switcher._fetch_active_usage(
+                "1", "test@example.com", self._EXPIRED
+            )
+
+        assert result.sentinel == USAGE_TOKEN_EXPIRED
+        mock_refresh.assert_not_called()
+        write_live.assert_not_called()
+        write_backup.assert_not_called()
+
     def test_no_token_returns_no_credentials(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict
     ):
@@ -9877,6 +9902,45 @@ class TestConsumeGate:
         assert posted["creds"] == fresher      # re-read bytes, not snapshot
         assert result.credentials == self._NEW
         assert s._read_account_credentials("1", "test@example.com") == self._NEW
+
+    def test_no_active_refresh_never_spends_the_live_grant(
+        self, temp_home: Path, sample_sequence_data: dict, monkeypatch
+    ):
+        """A slot the collector read as inactive whose refresh token is the
+        live store's is the active account; the gate leaves it to Claude Code."""
+        s = self._switcher(sample_sequence_data)
+        s._write_account_credentials("1", "test@example.com", self._OLD)
+        monkeypatch.setenv("CLAUDE_SWAP_NO_ACTIVE_REFRESH", "1")
+
+        with patch.object(s, "_read_active_credentials",
+                          return_value=ActiveCredentials(self._OLD, False)), \
+             patch("claude_swap.oauth.try_refresh_oauth_credentials") as mock_refresh:
+            result = s.consume_backup_grant("1", "test@example.com", self._OLD)
+
+        mock_refresh.assert_not_called()
+        assert result.error == "transient"
+        assert s._read_account_credentials("1", "test@example.com") == self._OLD
+
+    @pytest.mark.parametrize("active", [
+        ActiveCredentials("", True),        # Keychain read failed, nothing covered it
+        ActiveCredentials("x", False, True),  # served by a fallback: maybe stale
+        ActiveCredentials(None, False),     # plaintext-file read error
+    ])
+    def test_no_active_refresh_defers_when_the_live_store_is_unreadable(
+        self, temp_home: Path, sample_sequence_data: dict, monkeypatch, active
+    ):
+        """An unreadable live store cannot rule out that the slot's grant is
+        the live one, so the gate spends nothing."""
+        s = self._switcher(sample_sequence_data)
+        s._write_account_credentials("1", "test@example.com", self._OLD)
+        monkeypatch.setenv("CLAUDE_SWAP_NO_ACTIVE_REFRESH", "1")
+
+        with patch.object(s, "_read_active_credentials", return_value=active), \
+             patch("claude_swap.oauth.try_refresh_oauth_credentials") as mock_refresh:
+            result = s.consume_backup_grant("1", "test@example.com", self._OLD)
+
+        mock_refresh.assert_not_called()
+        assert result.error == "transient"
 
     def test_gate_cas_persist_detects_racing_writer(
         self, temp_home: Path, sample_sequence_data: dict
