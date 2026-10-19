@@ -94,6 +94,10 @@ def _detect_install_method() -> str | None:
 
 def check_for_update(current_version: str) -> str | None:
     """Return a notification string if a newer version exists, else None."""
+    from claude_swap.settings import hardening_enabled
+
+    if hardening_enabled("no_update_check"):
+        return None
     try:
         latest_version = None
 

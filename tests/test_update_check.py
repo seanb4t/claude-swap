@@ -103,6 +103,29 @@ class TestCheckForUpdate:
         assert result is not None
         assert "0.4.0" in result
 
+    @patch("claude_swap.update_check.urllib.request.urlopen")
+    def test_env_opt_out_skips_the_check(self, mock_urlopen, tmp_path, monkeypatch):
+        cache_path = tmp_path / "cache.json"
+        _write_cache(cache_path, "0.5.0")
+        monkeypatch.setattr("claude_swap.update_check.CACHE_PATH", cache_path)
+        monkeypatch.setenv("CLAUDE_SWAP_NO_UPDATE_CHECK", "1")
+
+        result = check_for_update("0.3.2")
+
+        mock_urlopen.assert_not_called()
+        assert result is None
+
+    @patch("claude_swap.update_check.urllib.request.urlopen")
+    def test_settings_opt_out_skips_the_check(self, mock_urlopen, tmp_path, monkeypatch):
+        from claude_swap.settings import set_setting
+
+        monkeypatch.setattr("claude_swap.update_check.CACHE_PATH", tmp_path / "cache.json")
+        monkeypatch.setattr("claude_swap.paths.get_backup_root", lambda: tmp_path)
+        set_setting(tmp_path, "hardening.noUpdateCheck", "true")
+
+        assert check_for_update("0.3.2") is None
+        mock_urlopen.assert_not_called()
+
 
 class TestCheckForUpdatePrereleases:
     """claude-swap ships every cycle as a pre-release first, so the version
