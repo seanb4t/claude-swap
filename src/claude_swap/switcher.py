@@ -89,7 +89,12 @@ from claude_swap.paths import (
 )
 from claude_swap.process_detection import get_running_instances
 from claude_swap import poll_policy
-from claude_swap.settings import load_settings, parse_model_names, settings_path
+from claude_swap.settings import (
+    hardening_enabled,
+    load_settings,
+    parse_model_names,
+    settings_path,
+)
 from claude_swap.usage_store import (
     FetchRecord,
     UsageEntry,
@@ -2254,6 +2259,29 @@ class ClaudeAccountSwitcher:
                             refresh_input = profile
                             input_oauth = prof_oauth
                 consumed_fp = oauth.credential_fingerprint(refresh_input)
+                # hardening.noActiveRefresh: a slot read as inactive (e.g.
+                # through a torn ~/.claude.json) whose grant is the live
+                # store's belongs to the active account; Claude Code alone
+                # spends it. A live store that cannot be read cannot rule
+                # that out, so it defers too.
+                if consumed_fp and hardening_enabled("no_active_refresh"):
+                    active = self._read_active_credentials()
+                    if (
+                        active.value is None
+                        or active.keychain_unavailable
+                        or active.degraded
+                        or (
+                            active.value
+                            and oauth.credential_fingerprint(active.value)
+                            == consumed_fp
+                        )
+                    ):
+                        self._logger.info(
+                            "Account %s's refresh token is, or may be, the "
+                            "live one; leaving its refresh to Claude Code.",
+                            account_num,
+                        )
+                        return oauth.RefreshOutcome(None, "transient")
         except LockError:
             # Nothing consumed yet — a holder (switch, collector, CC) owns
             # the slot; defer cleanly rather than raise through callers
@@ -4271,6 +4299,12 @@ class ClaudeAccountSwitcher:
                 force_refresh
                 or FetchRecord(sentinel=USAGE_KEYCHAIN_UNAVAILABLE)
             )
+
+        # hardening.noActiveRefresh: a usage fetch never rotates or replaces
+        # the active credential; Claude Code refreshes it on its next use,
+        # and until then an expired token reads as expired.
+        if hardening_enabled("no_active_refresh"):
+            return _defer(force_refresh)
 
         # Store-resolution parity (M4), same refusal as the consume gate:
         # with CLAUDE_SECURESTORAGE_CONFIG_DIR set, CC reads/writes a
