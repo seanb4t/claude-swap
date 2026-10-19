@@ -19,6 +19,7 @@ from claude_swap.exceptions import (
     AccountNotFoundError,
     ConfigError,
     CredentialReadError,
+    CredentialWriteError,
     LockError,
     SessionError,
     SwitchError,
@@ -6495,6 +6496,160 @@ class TestMacosKeychainFallback:
         assert s._keychain_disabled_until == 0.0   # no re-probe scheduled
         assert s._use_keychain() is False          # pinned, stays file mode
 
+    def test_keychain_only_env_refuses_the_plaintext_fallback(
+        self, temp_home: Path, monkeypatch
+    ):
+        # CLAUDE_SWAP_KEYCHAIN_ONLY: a failed Keychain write raises instead of
+        # writing the plaintext file and deleting the live Keychain item.
+        s = self._macos_switcher()
+        store = s._store
+        monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "1")
+        monkeypatch.setattr(macos_keychain, "set_password", _raise_locked)
+        deleted: list = []
+        written: list = []
+        monkeypatch.setattr(
+            macos_keychain, "delete_password", lambda *a, **k: deleted.append(a)
+        )
+        monkeypatch.setattr(store, "_write_active_credentials_file", written.append)
+        with pytest.raises(CredentialWriteError):
+            store._write_oauth_credentials('{"claudeAiOauth": {"accessToken": "x"}}')
+        assert written == []
+        assert deleted == []
+
+    def test_keychain_only_counts_a_write_the_read_back_confirms(
+        self, temp_home: Path, monkeypatch, block_real_keychain
+    ):
+        # A `security` call that reports failure after committing the item
+        # (a timeout) is a completed write, not an aborted switch.
+        s = self._macos_switcher()
+        store = s._store
+        creds = '{"claudeAiOauth": {"accessToken": "x"}}'
+        monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "1")
+        key = (CLAUDE_CODE_KEYCHAIN_SERVICE, macos_keychain.keychain_account_name())
+
+        def set_then_fail(service, account, password):
+            block_real_keychain.data[(service, account)] = password
+            raise KeychainError("timed out")
+
+        monkeypatch.setattr(macos_keychain, "set_password", set_then_fail)
+        store._write_oauth_credentials(creds)
+        assert block_real_keychain.data[key] == creds
+        assert store._last_active_credentials_backend == "keychain"
+
+    def test_keychain_only_writes_despite_a_cached_unusable_verdict(
+        self, temp_home: Path, monkeypatch, block_real_keychain
+    ):
+        # An earlier failure (e.g. the one a rollback follows) must not turn
+        # the retry into a refusal without asking the Keychain again.
+        s = self._macos_switcher()
+        store = s._store
+        s._keychain_usable_cache = False
+        creds = '{"claudeAiOauth": {"accessToken": "y"}}'
+        monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "1")
+        store._write_oauth_credentials(creds)
+        key = (CLAUDE_CODE_KEYCHAIN_SERVICE, macos_keychain.keychain_account_name())
+        assert block_real_keychain.data[key] == creds
+
+    def test_keychain_only_deletes_an_existing_credentials_file(
+        self, temp_home: Path, monkeypatch
+    ):
+        s = self._macos_switcher()
+        cred_file = get_credentials_path()
+        cred_file.parent.mkdir(parents=True, exist_ok=True)
+        cred_file.write_text('{"claudeAiOauth": {"accessToken": "old"}}')
+        monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "1")
+        s._store._write_oauth_credentials('{"claudeAiOauth": {"accessToken": "new"}}')
+        assert not cred_file.exists()
+
+    def test_keychain_only_managed_key_refuses_primary_api_key(
+        self, temp_home: Path, monkeypatch
+    ):
+        s = self._macos_switcher()
+        store = s._store
+        monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "1")
+        monkeypatch.setattr(macos_keychain, "set_password", _raise_locked)
+        config_writes: list = []
+        monkeypatch.setattr(store, "_update_global_config", config_writes.append)
+        with pytest.raises(CredentialWriteError):
+            store._write_managed_credentials("sk-ant-api03-" + "x" * 40)
+        assert config_writes == []
+
+    def test_keychain_only_backup_writes_despite_a_cached_unusable_verdict(
+        self, temp_home: Path, monkeypatch, block_real_keychain
+    ):
+        s = self._macos_switcher()
+        store = s._store
+        s._keychain_usable_cache = False
+        creds = '{"claudeAiOauth": {"accessToken": "k"}}'
+        monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "1")
+        store._write_account_credentials("1", "a@example.com", creds)
+        username = store._backup_username("1", "a@example.com")
+        assert block_real_keychain.data[(SECURITY_SERVICE, username)] == creds
+        assert not store._backup_enc_path("1", "a@example.com").exists()
+
+    def test_keychain_only_reconcile_refuses_rewriting_a_stuck_enc(
+        self, temp_home: Path, monkeypatch
+    ):
+        # A leftover .enc that cannot be deleted would shadow the Keychain
+        # backup; keychainOnly raises instead of rewriting it with the token.
+        s = self._macos_switcher()
+        store = s._store
+        enc = store._backup_enc_path("1", "a@example.com")
+        store._write_backup_enc("1", "a@example.com", '{"claudeAiOauth": {"accessToken": "old"}}')
+        stale = enc.read_text()
+        real_unlink = Path.unlink
+
+        def stuck_unlink(self, *args, **kwargs):
+            if self == enc:
+                raise PermissionError("busy")
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", stuck_unlink)
+        monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "1")
+        with pytest.raises(CredentialWriteError, match="shadows"):
+            store._write_account_credentials(
+                "1", "a@example.com", '{"claudeAiOauth": {"accessToken": "new"}}'
+            )
+        assert enc.read_text() == stale
+
+    def test_keychain_only_backup_refuses_the_enc_fallback(
+        self, temp_home: Path, monkeypatch
+    ):
+        s = self._macos_switcher()
+        store = s._store
+        monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "1")
+        monkeypatch.setattr(macos_keychain, "set_password", _raise_locked)
+        with pytest.raises(CredentialWriteError):
+            store._write_account_credentials(
+                "1", "a@example.com", '{"claudeAiOauth": {"accessToken": "z"}}'
+            )
+        assert not store._backup_enc_path("1", "a@example.com").exists()
+
+    def test_keychain_only_skips_the_enc_prev_copy(
+        self, temp_home: Path, monkeypatch
+    ):
+        s = self._macos_switcher()
+        store = s._store
+        store._write_backup_enc("1", "a@example.com", '{"claudeAiOauth": {"accessToken": "a"}}')
+        s._keychain_usable_cache = False
+        monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "1")
+        store._retain_previous_backup(
+            "1", "a@example.com", '{"claudeAiOauth": {"accessToken": "b"}}'
+        )
+        assert not store._prev_backup_path("1", "a@example.com").exists()
+
+    def test_keychain_only_refuses_the_unclaimed_stash(
+        self, temp_home: Path, monkeypatch
+    ):
+        s = self._macos_switcher()
+        store = s._store
+        monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "1")
+        with pytest.raises(CredentialWriteError, match="cswap add"):
+            store._write_unclaimed_credential(
+                '{"claudeAiOauth": {"accessToken": "u"}}', {"reason": "test"}
+            )
+        assert not list(s.credentials_dir.glob(".unclaimed-*.enc"))
+
     def test_write_fallback_clears_pending_read_reprobe(self, temp_home: Path, monkeypatch):
         # The owner's edge: already in file mode from a read timeout with a
         # re-probe still pending, then a write leaves a stale item behind. The
@@ -9937,6 +10092,23 @@ class TestConsumeGate:
 
         with patch.object(s, "_read_active_credentials", return_value=active), \
              patch("claude_swap.oauth.try_refresh_oauth_credentials") as mock_refresh:
+            result = s.consume_backup_grant("1", "test@example.com", self._OLD)
+
+        mock_refresh.assert_not_called()
+        assert result.error == "transient"
+
+    def test_keychain_only_spends_no_grant_while_the_keychain_is_unusable(
+        self, temp_home: Path, sample_sequence_data: dict, monkeypatch
+    ):
+        """keychainOnly has no plaintext stash, so a successor that cannot
+        reach the Keychain would be lost: the gate spends nothing."""
+        s = self._switcher(sample_sequence_data)
+        s.platform = Platform.MACOS
+        s._write_account_credentials("1", "test@example.com", self._OLD)
+        monkeypatch.setenv("CLAUDE_SWAP_KEYCHAIN_ONLY", "1")
+        s._keychain_usable_cache = False
+
+        with patch("claude_swap.oauth.try_refresh_oauth_credentials") as mock_refresh:
             result = s.consume_backup_grant("1", "test@example.com", self._OLD)
 
         mock_refresh.assert_not_called()

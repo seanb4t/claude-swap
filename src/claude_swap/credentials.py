@@ -40,6 +40,7 @@ from claude_swap.paths import (
     get_default_claude_config_home,
     get_global_config_path,
 )
+from claude_swap.settings import hardening_enabled
 
 _logger = logging.getLogger("claude-swap")
 
@@ -753,6 +754,50 @@ class CredentialStore:
         cred_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_text(cred_dir / ".credentials.json", credentials)
 
+    def _keychain_only(self) -> bool:
+        """macOS with hardening.keychainOnly: credentials never leave the Keychain."""
+        return self._host.platform == Platform.MACOS and hardening_enabled(
+            "keychain_only"
+        )
+
+    def _keychain_only_set(self, service: str, account: str, secret: str) -> None:
+        """Write a Keychain item in keychain-only mode, or raise.
+
+        Attempted even when an earlier op marked the Keychain unusable: that
+        verdict only selects the file fallback this mode forbids. A write
+        reported as failed counts as done when a direct read-back returns the
+        secret, since a timed-out ``security`` may still have committed it.
+
+        Raises:
+            CredentialWriteError: If the item does not hold ``secret``.
+        """
+        try:
+            macos_keychain.set_password(service, account, secret)
+            return
+        except macos_keychain.KEYCHAIN_ERRORS as e:
+            error = e
+        try:
+            if macos_keychain.get_password(service, account) == secret:
+                return
+        except macos_keychain.KEYCHAIN_ERRORS:
+            pass
+        raise CredentialWriteError(
+            f"Keychain write failed ({error}); hardening.keychainOnly forbids "
+            "the plaintext fallback"
+        ) from error
+
+    def _drop_credentials_file(self) -> None:
+        """Delete Claude Code's plaintext ``.credentials.json`` if present.
+
+        Keychain-only mode's replacement for rewriting it: once the file is
+        absent, a running Claude Code picks the new credential up from the
+        Keychain (see ``_refresh_stale_credentials_file``). Best-effort.
+        """
+        try:
+            get_credentials_path().unlink(missing_ok=True)
+        except OSError as e:
+            self._host._logger.warning(f"Could not remove .credentials.json: {e}")
+
     def _delete_active_keychain_entry(self) -> bool:
         """Best-effort removal of the active-credential Keychain item (macOS only).
 
@@ -812,7 +857,14 @@ class CredentialStore:
             CredentialWriteError: If persisting the key fails.
         """
         wrote_to_keychain = False
-        if self._use_keychain():
+        if self._keychain_only():
+            self._keychain_only_set(
+                CLAUDE_CODE_MANAGED_KEYCHAIN_SERVICE,
+                macos_keychain.keychain_account_name(),
+                api_key,
+            )
+            wrote_to_keychain = True
+        elif self._use_keychain():
             try:
                 self._kc_call(
                     macos_keychain.set_password,
@@ -953,6 +1005,15 @@ class CredentialStore:
         Raises:
             CredentialWriteError: If writing credentials fails.
         """
+        if self._keychain_only():
+            self._keychain_only_set(
+                CLAUDE_CODE_KEYCHAIN_SERVICE,
+                macos_keychain.keychain_account_name(),
+                credentials,
+            )
+            self._drop_credentials_file()
+            self._last_active_credentials_backend = "keychain"
+            return
         if self._use_keychain():
             try:
                 self._kc_call(
@@ -1118,6 +1179,12 @@ class CredentialStore:
             enc_file.unlink()
             return
         except Exception as e:
+            if self._keychain_only():
+                raise CredentialWriteError(
+                    f"Could not delete {enc_file.name}, which shadows the "
+                    f"Keychain backup ({e}); hardening.keychainOnly forbids "
+                    "rewriting it"
+                ) from e
             self._host._logger.warning(
                 f"Could not delete .enc after Keychain backup write ({e}); "
                 "rewriting it with the fresh credentials to keep both consistent"
@@ -1286,6 +1353,14 @@ class CredentialStore:
         a /login.
         """
         self._retain_previous_backup(account_num, email, credentials)
+        if self._keychain_only():
+            self._keychain_only_set(
+                SECURITY_SERVICE,
+                self._backup_username(account_num, email),
+                credentials,
+            )
+            self._reconcile_enc_after_keychain_write(account_num, email, credentials)
+            return
         if self._use_keychain():
             try:
                 self._kc_write_backup(account_num, email, credentials)
@@ -1471,6 +1546,12 @@ class CredentialStore:
             )
             return
         if not current or current == new_credentials:
+            return
+        if not self._use_keychain() and self._keychain_only():
+            self._host._logger.warning(
+                f"Keychain unavailable; hardening.keychainOnly skips the "
+                f".enc.prev copy for account {account_num}"
+            )
             return
         try:
             if self._use_keychain():
@@ -1739,6 +1820,12 @@ class CredentialStore:
         file is written before the manifest: an entry without manifest metadata
         is recoverable; a manifest row without bytes is not.
         """
+        if self._keychain_only():
+            raise CredentialWriteError(
+                "hardening.keychainOnly forbids the plaintext unclaimed stash; "
+                "if the current login is not a managed account yet, run "
+                "`cswap add` first"
+            )
         import hashlib
         import secrets
         from datetime import datetime, timezone
